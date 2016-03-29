@@ -28,7 +28,7 @@
 
 /**
  * SQLiteConfig
-*/
+ */
 @interface SQLiteConfig : NSObject
 
 @property (nonatomic, strong) NSString *pathFile;
@@ -54,16 +54,17 @@
 @interface SQLiteDatabase : NSObject
 
 @property (nonatomic, assign) sqlite3 *db;
-@property (nonatomic, strong) SQLiteConfig *config;
 
 // TableName
 - (NSString*)tableName:(Class)classVar;
 
+- (long)queryScalarLong:(NSString*)sql error:(SQLiteError**)error;
 - (void)executeSql:(NSString*)sql error:(SQLiteError**)error;
 - (void)createTable:(Class)classVar error:(SQLiteError**)error;
 - (void)dropTable:(Class)classVar error:(SQLiteError**)error;
 - (void)insert:(NSObject<SQLiteProtocol>*)object error:(SQLiteError**)error;
 - (void)insertAll:(NSArray*)arrObject error:(SQLiteError**)error;
+- (NSArray*)selectList:(Class)classVar sql:(NSString*)sql error:(SQLiteError**)error;
 - (void)close;
 
 @end
@@ -133,5 +134,6 @@ typedef enum
 
 - (NSString*)sqliteFieldType;
 - (void)bindToSqliteStatement:(sqlite3_stmt *)stmt object:(NSObject<SQLiteProtocol>*)object index:(int)index;
+- (void)valueFromSqliteStatement:(sqlite3_stmt *)stmt object:(NSObject<SQLiteProtocol>*)object index:(int)index stmtColumns:(NSArray*)stmtColumns;
 
 @end

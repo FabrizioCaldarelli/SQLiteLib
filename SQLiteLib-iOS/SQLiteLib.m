@@ -47,6 +47,32 @@
  */
 @implementation SQLiteDatabase
 
+- (long)queryScalarLong:(NSString*)sql error:(SQLiteError**)error
+{
+    long retVal = 0;
+    *error = NULL;
+    
+    const char *sqlStatement = [sql UTF8String];
+    sqlite3_stmt *compiledStatement;
+    if(sqlite3_prepare_v2(self.db, sqlStatement,-1, &compiledStatement, NULL) == SQLITE_OK)
+    {
+        if(sqlite3_step(compiledStatement) == SQLITE_ROW)
+        {
+            retVal = sqlite3_column_int64(compiledStatement, 0);
+        }
+        else
+        {
+            *error = [SQLiteError createFromDatabase:self.db];
+        }
+    }
+    else
+    {
+        *error = [SQLiteError createFromDatabase:self.db];
+    }
+    sqlite3_finalize(compiledStatement);
+    
+    return retVal;
+}
 
 - (void)executeSql:(NSString*)sql error:(SQLiteError**)error
 {
@@ -68,33 +94,7 @@
     sqlite3_finalize(compiledStatement);
 }
 
-- (void)executeInsertOrUpdate:(NSString*)sql object:(id<SQLiteProtocol>)object error:(SQLiteError**)error
-{
-    *error = NULL;
-    
-    const char *sqlStatement = [sql UTF8String];
-    sqlite3_stmt *compiledStatement;
-    if(sqlite3_prepare_v2(self.db, sqlStatement,-1, &compiledStatement, NULL) == SQLITE_OK)
-    {
-        
-        NSArray *classFields = [object SQLiteFields];
-        for(int k=0;k<classFields.count;k++)
-        {
-            SQLiteField *f = [classFields objectAtIndex:k];
-            [f bindToSqliteStatement:compiledStatement object:object index:(k+1)];
-        }
-        
-        if(sqlite3_step(compiledStatement) != SQLITE_DONE)
-        {
-            *error = [SQLiteError createFromDatabase:self.db];
-        }
-    }
-    else
-    {
-        *error = [SQLiteError createFromDatabase:self.db];
-    }
-    sqlite3_finalize(compiledStatement);
-}
+
 
 // TableName
 - (NSString*)tableName:(Class)classVar
@@ -145,7 +145,7 @@
     NSString *sql = [self prepareCreateTableSql:classVar];
     [self executeSql:sql error:error];
 }
-// --- CreateTable - Fine
+// --- CreateTable - End
 
 
 // --- DropTable
@@ -187,21 +187,100 @@
 }
 - (void)insert:(NSObject<SQLiteProtocol>*)object error:(SQLiteError**)error;
 {
-    NSString *sql = [self prepareInsertSql:[object class]];
-    [self executeInsertOrUpdate:sql object:object error:error];
+    [self insertAll:@[ object ] error:error];
 }
 - (void)insertAll:(NSArray*)arrObject error:(SQLiteError**)error
 {
-    NSString *sql = nil;
+    char *errorMessage;
     
-    for (NSObject<SQLiteProtocol> *object in arrObject) {
-        if(sql == nil) sql = [self prepareInsertSql:[object class]];
+    if(arrObject.count > 0)
+    {
+        NSObject<SQLiteProtocol> *firstObject = [arrObject firstObject];
+        NSString *sql = [self prepareInsertSql:[firstObject class]];
         
-        [self executeInsertOrUpdate:sql object:object error:error];
+        sqlite3_exec(self.db, "BEGIN TRANSACTION", NULL, NULL, &errorMessage);
+        
+        const char *sqlStatement = [sql UTF8String];
+        sqlite3_stmt *stmt;
+        if(sqlite3_prepare_v2(self.db, sqlStatement,-1, &stmt, NULL) == SQLITE_OK)
+        {
+            for (NSObject<SQLiteProtocol> *object in arrObject) {
+                
+                NSArray *classFields = [object SQLiteFields];
+                for(int k=0;k<classFields.count;k++)
+                {
+                    SQLiteField *f = [classFields objectAtIndex:k];
+                    [f bindToSqliteStatement:stmt object:object index:(k+1)];
+                }
+                
+                if(sqlite3_step(stmt) != SQLITE_DONE)
+                {
+                    *error = [SQLiteError createFromDatabase:self.db];
+                }
+                sqlite3_reset(stmt);
+            }
+            sqlite3_exec(self.db, "COMMIT TRANSACTION", NULL, NULL, &errorMessage);
+            sqlite3_finalize(stmt);
+        }
+        else
+        {
+            *error = [SQLiteError createFromDatabase:self.db];
+        }
     }
-
 }
-// --- Insert - Fine
+// --- Insert - End
+
+
+// --- Select
+- (NSArray*)selectList:(Class)classVar sql:(NSString*)sql error:(SQLiteError**)error
+{
+    *error = NULL;
+    
+    NSMutableArray *listOut = [NSMutableArray array];
+    
+    const char *sqlStatement = [sql UTF8String];
+    sqlite3_stmt *compiledStatement;
+    if(sqlite3_prepare_v2(self.db, sqlStatement,-1, &compiledStatement, NULL) == SQLITE_OK)
+    {
+        // StatementsColumn
+        NSMutableArray *stmtColumns = [NSMutableArray array];
+        for(int kCol=0;kCol<sqlite3_column_count(compiledStatement);kCol++)
+        {
+            NSString *cn = [NSString stringWithUTF8String:(char *) sqlite3_column_name(compiledStatement, kCol)];
+            [stmtColumns addObject:cn];
+        }
+        
+        while(sqlite3_step(compiledStatement) == SQLITE_ROW) {
+            
+            id<SQLiteProtocol> object = [[classVar alloc] init];
+            NSArray *classFields = [object SQLiteFields];
+            for(int k=0;k<classFields.count;k++)
+            {
+                SQLiteField *f = [classFields objectAtIndex:k];
+                [f valueFromSqliteStatement:compiledStatement object:object index:k stmtColumns:stmtColumns];
+            }
+            [listOut addObject:object];
+        }
+        
+        
+        if(sqlite3_step(compiledStatement) != SQLITE_DONE)
+        {
+            *error = [SQLiteError createFromDatabase:self.db];
+        }
+        else
+        {
+            sqlite3_finalize(compiledStatement);
+        }
+    }
+    else
+    {
+        *error = [SQLiteError createFromDatabase:self.db];
+    }
+    
+    return [NSArray arrayWithArray:listOut];
+}
+// --- Select - End
+
 
 - (void)close
 {
@@ -358,6 +437,71 @@
     }
 }
 
+- (void)valueFromSqliteStatement:(sqlite3_stmt *)stmt object:(NSObject<SQLiteProtocol>*)object index:(int)index stmtColumns:(NSArray*)stmtColumns
+{
+    BOOL foundColumn = NO;
+    if(index<stmtColumns.count)
+    {
+        NSString *cn = [stmtColumns objectAtIndex:index];
+        if([cn isEqualToString:self.name]) foundColumn = YES;
+    }
+    
+    int curIndex = index;
+    
+    if(foundColumn == NO)
+    {
+        curIndex = -1;
+        
+        int k = 0;
+        while((foundColumn == NO)&&(k<stmtColumns.count))
+        {
+            NSString *cn = [stmtColumns objectAtIndex:k];
+            if([cn isEqualToString:self.name])
+            {
+                foundColumn = YES;
+            }
+            else
+            {
+                k++;
+            }
+        }
+        if(foundColumn) curIndex = k;
+    }
+    
+    if(curIndex>=0)
+    {
+        switch (self.type) {
+            case SQLiteFieldTypeBoolean:
+                [object setValue:[NSNumber numberWithInt:sqlite3_column_int(stmt, curIndex)] forKey:self.name];
+                break;
+            case SQLiteFieldTypeArray:
+                break;
+            case SQLiteFieldTypeDateTime:
+            {
+                char *chs = (char *) sqlite3_column_text(stmt, curIndex);
+                NSString *s = (chs!=NULL)?[NSString stringWithUTF8String:(char *) sqlite3_column_text(stmt, curIndex)]:nil;
+                NSDate *d = nil;
+                if(s!=nil) d = [SQLiteField convertFromStringUTCToDate:s];
+                [object setValue:d forKey:self.name];
+            }
+                break;
+            case SQLiteFieldTypeFloat:
+                [object setValue:[NSNumber numberWithFloat:sqlite3_column_double(stmt, curIndex)] forKey:self.name];
+                break;
+            case SQLiteFieldTypeInteger:
+                [object setValue:[NSNumber numberWithInt:sqlite3_column_int(stmt, curIndex)] forKey:self.name];
+                break;
+            case SQLiteFieldTypeString:
+            {
+                char *chs = (char *) sqlite3_column_text(stmt, curIndex);
+                NSString *s = (chs!=NULL)?[NSString stringWithUTF8String:(char *) sqlite3_column_text(stmt, curIndex)]:nil;
+                [object setValue:s forKey:self.name];
+            }
+                break;
+        }
+    }
+}
+
 - (SQLiteField*)initWithName:(NSString*)name type:(SQLiteFieldType)type extra:(NSArray*)extra
 {
     self = [self init];
@@ -374,7 +518,7 @@
 }
 + (SQLiteField*)field:(NSString*)name type:(SQLiteFieldType)type
 {
-    return [SQLiteField field:name type:type];
+    return [SQLiteField field:name type:type extra:nil];
 }
 
 
