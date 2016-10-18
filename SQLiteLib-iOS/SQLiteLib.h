@@ -65,6 +65,7 @@
 - (void)insert:(NSObject<SQLiteProtocol>*)object error:(SQLiteError**)error;
 - (void)insertAll:(NSArray*)arrObject error:(SQLiteError**)error;
 - (NSArray*)selectList:(Class)classVar sql:(NSString*)sql error:(SQLiteError**)error;
+- (void)addGpsDistanceFunction:(NSString*)functionName;
 - (void)close;
 
 @end
